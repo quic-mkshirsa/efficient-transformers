@@ -51,7 +51,7 @@ def _parse_args():
     parser.add_argument(
         "--decode-num-devices",
         type=int,
-        default=int(os.environ.get("QEFF_DECODE_NUM_DEVICES", "4")),
+        default=int(os.environ.get("QEFF_DECODE_NUM_DEVICES", "4")),  # 4 devices for 14K context length/DC; 2 devices for 64K context length/Appliance
     )
     return parser.parse_args()
 
@@ -94,14 +94,14 @@ DECODE_NUM_DEVICES = args.decode_num_devices
 config = AutoConfig.from_pretrained(model_id)
 
 # For faster execution user can run with lesser layers, For Testing Purpose Only
-config.vision_config.depth = 5
+# config.vision_config.depth = 5
 config.text_config.num_hidden_layers = 4
 config.torch_dtype = "float16"
 layer_types = list(getattr(config.text_config, "layer_types", []))
 if len(layer_types) < config.text_config.num_hidden_layers:
     layer_types.extend(["full_attention"] * (config.text_config.num_hidden_layers - len(layer_types)))
 config.text_config.layer_types = layer_types[: config.text_config.num_hidden_layers]
-# config.text_config.layer_types = layer_types[0 : 1]
+# config.text_config.layer_types = layer_types[3 : 4]
 
 
 def _resolve_retained_state(source_outputs, logical_name):
@@ -131,7 +131,7 @@ def _update_retained_states(target_inputs, source_outputs):
             target_name, value = _resolve_retained_state(source_outputs, logical_name)
             target_inputs[target_name] = value
 
-
+config.text_config.num_cores_per_device = 16
 qeff_model = QEFFAutoModelForImageTextToText.from_pretrained(
     model_id,
     attn_implementation="eager",
@@ -150,34 +150,45 @@ PREFILL_SEQ_LEN = 512
 CTX_LEN = 14 * 1024
 BATCH_SIZE = 512  # Per-slot prefill batch size
 BS = BATCH_SIZE
-FULL_BATCH_SIZE = 512  # Total concurrent CB slots
+FULL_BATCH_SIZE = 512   # Total concurrent CB slots
 
-# Online-prefill KV blocking (matches GQA_Benchmark_Merged/qwen3_35b_a3b_online_prefill.sh:
-# NUM_KV_BLOCKS=8, IMPLS=online, Q_BLOCK_SIZE=256 -> num_q_blocks=ceil(1024/256)=4,
-# Q_HEAD_BLOCK_CHUNK=1 -> n_rep_chunk=1).
-# To disable KV blocking, comment out the qaic_config= line in the prefill compile() call below.
+
+# Enable For Appliance
+# qaic_config = {
+#     "blocking_mode": "prefill_online",
+#     "num_kv_blocks": 32,
+#     "num_q_blocks": 2,
+#     "n_rep_chunk": 1,
+#     "skip_kv": True,
+# }
+
+# Enable For DC
 qaic_config = {
     "blocking_mode": "prefill_online",
     "num_kv_blocks": 16,
-    "num_q_blocks": 4,
+    "num_q_blocks": 2,
     "n_rep_chunk": 1,
     "skip_kv": True,
 }
+
+# Enable For Appliance
 
 # CL 64K BSZ1
 # Decode-time KV blocking:
 # decode_qaic_config = {
 #     "blocking_mode": "kv_headpar",
-#     "num_kv_blocks": 8,
+#     "num_kv_blocks": 4,
 #     "skip_kv": True,
 # }
+
+# Enable For DC
 
 # CL 14K BSZ512
 # Decode-time KV blocking plus EP decode.
 decode_qaic_config = {
     "qeff_chunk_size": 1,
     "blocking_mode": "kv_batch_fold",
-    "num_kv_blocks": 16,
+    "num_kv_blocks": 64,
     "gdn_num_head_blocks": int(os.environ.get("QEFF_GDN_NUM_HEAD_BLOCKS", "8")),
     "skip_kv": True,
     "moe_config": {
@@ -191,13 +202,14 @@ decode_qaic_config = {
 enable_blocking = True
 
 generation_len = args.generation_len
-# os.environ["QAIC_COMPILER_OPTS_UNSUPPORTED"] = (
-#     "-aic-user-order -aic-hoist-vtcm-loads=false "
-#     "-aic-op-stats-verbosity 2 -aic-hmx-async=0 -aic-userdma-async=0 -aic-sync-ts-starts"
-# )
 os.environ["QAIC_COMPILER_OPTS_UNSUPPORTED"] = (
-    "-aic-op-stats-verbosity 2 -aic-hoist-vtcm-loads=false -aic-hmx-async=0 -aic-userdma-async=0"
+    "-aic-hoist-vtcm-loads=false "
+    "-aic-op-stats-verbosity 2 "
 )
+WORKSPACE="/local/mnt/workspace/mkshirsa/qwen36_validate/test_pr"
+# os.environ["QAIC_COMPILER_OPTS_UNSUPPORTED"] = (
+#     "-aic-sim-save-temps -aic-dump-llvm-ir-postopt -debug-glow=1 -aic-save-asm -aic-dump-graphs-dir=/local/mnt/workspace/mkshirsa/qwen36_validate/test_pr/irdump -aic-op-stats-verbosity 2 -aic-hoist-vtcm-loads=false"
+# )
 skip_vision = args.skip_vision
 
 if skip_vision:
@@ -277,59 +289,61 @@ else:
     print(f"Prefill compile time: {prefill_timings['compile']:.2f} secs")
     print(f"Prefill export+compile total time: {prefill_total_time:.2f} secs")
 
-if args.decode_qpc_path:
-    decode_qpc_path = _validate_qpc_path(args.decode_qpc_path, "decode")
-    print(f"Using compiled decode QPC: {decode_qpc_path}")
-else:
-    decode_timings = {"export": 0.0, "compile": 0.0}
-    lang_export = qeff_model.lang_model.export
-    lang_compile = qeff_model.lang_model._compile
-    qeff_model.lang_model.export = _timed_call(decode_timings, "export", lang_export)
-    qeff_model.lang_model._compile = _timed_call(decode_timings, "compile", lang_compile)
-    decode_total_start = perf_counter()
-    try:
-        decode_compile_result = qeff_model.compile(
-            batch_size=BS,
-            kv_cache_batch_size=FULL_BATCH_SIZE,
-            full_batch_size=FULL_BATCH_SIZE,
-            prefill_seq_len=1,
-            ctx_len=CTX_LEN,
-            height=354,
-            width=536,
-            num_cores=4,
-            num_devices=DECODE_NUM_DEVICES,
-            mxfp6_matmul=True,
-            mxint8_kv_cache=True,
-            retain_full_kv=True,
-            split_model_io=True,  # This should be used for disagg serving via VLLM
-            aic_enable_depth_first=False,
-            user_tiled=True,
-            prefill_only=False,
-            skip_vision=True,
-            use_onnx_subfunctions=True,
-            stats_level=70,
-            ddr_stats=True,
-            aic_pmu_recipe="KernelUtil",
-            aic_perf_metrics=True,
-            qaic_config=decode_qaic_config,  # Enable KV blocking - comment out to disable
-            kv_cache_prefix="vllmKvCache",
-            allow_mxint8_mdp_io=True,
-            # network_specialization_config="/path/to/specializations.json"
+skip_decode = False
+if not skip_decode: 
+    if args.decode_qpc_path:
+        decode_qpc_path = _validate_qpc_path(args.decode_qpc_path, "decode")
+        print(f"Using compiled decode QPC: {decode_qpc_path}")
+    else:
+        decode_timings = {"export": 0.0, "compile": 0.0}
+        lang_export = qeff_model.lang_model.export
+        lang_compile = qeff_model.lang_model._compile
+        qeff_model.lang_model.export = _timed_call(decode_timings, "export", lang_export)
+        qeff_model.lang_model._compile = _timed_call(decode_timings, "compile", lang_compile)
+        decode_total_start = perf_counter()
+        try:
+            decode_compile_result = qeff_model.compile(
+                batch_size=BS,
+                kv_cache_batch_size=FULL_BATCH_SIZE,
+                full_batch_size=FULL_BATCH_SIZE,
+                prefill_seq_len=1,
+                ctx_len=CTX_LEN,
+                height=354,
+                width=536,
+                num_cores=16,
+                num_devices=DECODE_NUM_DEVICES,
+                mxfp6_matmul=True,
+                mxint8_kv_cache=True,
+                retain_full_kv=True,
+                split_model_io=True,  # This should be used for disagg serving via VLLM
+                aic_enable_depth_first=False,
+                user_tiled=True,
+                prefill_only=False,
+                skip_vision=True,
+                use_onnx_subfunctions=True,
+                stats_level=70,
+                ddr_stats=True,
+                aic_pmu_recipe="KernelUtil",
+                aic_perf_metrics=True,
+                qaic_config=decode_qaic_config,  # Enable KV blocking - comment out to disable
+                kv_cache_prefix="vllmKvCache",
+                allow_mxint8_mdp_io=True,
+                # network_specialization_config="/path/to/specializations.json"
+            )
+        finally:
+            decode_total_time = perf_counter() - decode_total_start
+            qeff_model.lang_model.export = lang_export
+            qeff_model.lang_model._compile = lang_compile
+        decode_qpc_path = _compiled_qpc_path(
+            decode_compile_result,
+            "lang_decode_qpc_path",
+            "decode",
+            fallback_keys=("lang_qpc_path",),
         )
-    finally:
-        decode_total_time = perf_counter() - decode_total_start
-        qeff_model.lang_model.export = lang_export
-        qeff_model.lang_model._compile = lang_compile
-    decode_qpc_path = _compiled_qpc_path(
-        decode_compile_result,
-        "lang_decode_qpc_path",
-        "decode",
-        fallback_keys=("lang_qpc_path",),
-    )
-    print(f"Compiled decode QPC: {decode_qpc_path}")
-    print(f"Decode export time: {decode_timings['export']:.2f} secs")
-    print(f"Decode compile time: {decode_timings['compile']:.2f} secs")
-    print(f"Decode export+compile total time: {decode_total_time:.2f} secs")
+        print(f"Compiled decode QPC: {decode_qpc_path}")
+        print(f"Decode export time: {decode_timings['export']:.2f} secs")
+        print(f"Decode compile time: {decode_timings['compile']:.2f} secs")
+        print(f"Decode export+compile total time: {decode_total_time:.2f} secs")
 
 if enable_blocking:
     print("\n" + "=" * 80)
