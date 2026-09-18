@@ -6,6 +6,7 @@
 # -----------------------------------------------------------------------------
 
 import argparse
+import functools
 import os
 from time import perf_counter
 
@@ -131,6 +132,53 @@ def _update_retained_states(target_inputs, source_outputs):
             target_name, value = _resolve_retained_state(source_outputs, logical_name)
             target_inputs[target_name] = value
 
+PREFILL_SEQ_LEN = 512
+GDN_CHUNK_SIZE = 512
+CTX_LEN = 14 * 1024
+BATCH_SIZE = 512  # Per-slot prefill batch size
+BS = BATCH_SIZE
+FULL_BATCH_SIZE = 512  # Total concurrent CB slots
+
+
+def _resize_gdn_chunk_buffers(linear_attn, chunk_size: int):
+    device = linear_attn._mask_causal.device
+    linear_attn.register_buffer(
+        "_mask_causal",
+        torch.triu(torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=device), diagonal=0),
+        persistent=False,
+    )
+    linear_attn.register_buffer(
+        "_mask_strict",
+        torch.triu(torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=device), diagonal=1),
+        persistent=False,
+    )
+    linear_attn.register_buffer(
+        "_ones_lower",
+        torch.tril(torch.ones(chunk_size, chunk_size, dtype=torch.float32, device=device), diagonal=0),
+        persistent=False,
+    )
+    linear_attn.register_buffer(
+        "_eye",
+        torch.eye(chunk_size, dtype=torch.float32, device=device),
+        persistent=False,
+    )
+
+
+def apply_chunk_size(qeff_model, chunk_size: int):
+    """Bind each GDN layer to script-local chunk masks sized for this export."""
+    language_model = getattr(qeff_model.model, "language_model", None)
+    if language_model is None:
+        language_model = qeff_model.model.model.language_model
+
+    for decoder_layer in language_model.layers:
+        linear_attn = getattr(decoder_layer, "linear_attn", None)
+        if linear_attn is not None:
+            _resize_gdn_chunk_buffers(linear_attn, chunk_size)
+            linear_attn.chunk_gated_delta_rule = functools.partial(
+                linear_attn.torch_chunk_gated_delta_rule_qeff, chunk_size=chunk_size
+            )
+
+
 config.text_config.num_cores_per_device = 16
 qeff_model = QEFFAutoModelForImageTextToText.from_pretrained(
     model_id,
@@ -146,11 +194,7 @@ qeff_model = QEFFAutoModelForImageTextToText.from_pretrained(
 tokenizer = transformers.AutoTokenizer.from_pretrained(model_id)
 processor = AutoProcessor.from_pretrained(model_id)
 
-PREFILL_SEQ_LEN = 512
-CTX_LEN = 14 * 1024
-BATCH_SIZE = 512  # Per-slot prefill batch size
-BS = BATCH_SIZE
-FULL_BATCH_SIZE = 512   # Total concurrent CB slots
+apply_chunk_size(qeff_model, GDN_CHUNK_SIZE)
 
 
 # Enable For DC
