@@ -567,7 +567,7 @@ class TestBlockingWrapperFallbackAndParity:
         decode_specialization = QEffQwen4ExpDecodeExportMixin.get_specializations(wrapper, 1, 32, 128)[0]
         custom_io = QEffQwen4ExpDecodeExportMixin.get_custom_io(wrapper, dtype="float16", mxint8_kv_cache=True)
         assert decode_specialization["seq_len"] == 1
-        assert custom_io["qsa_partial_state.0"] == "mxint8"
+        assert custom_io["qsa_partial_state.0"] == "float"
 
         QEffQwen4ExpTextAttention.configure_qsa(attention, {"attn_dp": 1}, ctx_len=128, seq_len=32, prefill_only=True)
         prefill_specialization = QEffQwen4ExpDecodeExportMixin.get_specializations(wrapper, 1, 32, 128)[0]

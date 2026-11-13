@@ -141,6 +141,32 @@ def _build_qwen4_exp_pooled_mrope_cache(cos_cached, sin_cached, config, rotary_w
     )
 
 
+def _qeff_validate_qsa_blocks(raw_blocks, visible):
+    """Return safe QSA block indices and validity from the original mask."""
+    blocks_in_range = (raw_blocks >= 0) & (raw_blocks < visible.shape[-1])
+    blocks = raw_blocks.clamp(0, visible.shape[-1] - 1)
+    blocks_valid = blocks_in_range & visible.gather(-1, blocks)
+    return blocks, blocks_valid
+
+
+def _qeff_qsa_select_blocks(scores, visible, block_topk):
+    """Select only visible QSA blocks and keep backend TopK indices safe."""
+    # Some backends return invalid indices when every TopK input is -inf.  A
+    # finite dtype minimum preserves masked ordering, while the checks below
+    # keep any invalid backend result from reaching cache gathering.
+    masked_scores = scores.masked_fill(~visible, torch.finfo(scores.dtype).min)
+    raw_blocks = masked_scores.topk(min(block_topk, masked_scores.shape[-1]), dim=-1).indices
+    return _qeff_validate_qsa_blocks(raw_blocks, visible)
+
+
+def _qeff_flatten_qsa_shards(scores, visible):
+    """Flatten CP shards in logical context-block order."""
+    scores = scores.transpose(-2, -1)
+    visible = visible.transpose(-2, -1)
+    batch = scores.shape[0] * scores.shape[1]
+    return scores.reshape(batch, -1), visible.reshape(batch, -1)
+
+
 class QEffQwen4ExpTextRMSNormGated(Qwen4ExpTextRMSNormGated):
     def forward(self, hidden_states, gate):
         rms_interface = select_interface(CustomRMSNormFunc.apply, torch.ops.qefficient.rms_norm)
@@ -152,16 +178,15 @@ class QEffQwen4ExpTextRMSNorm(Qwen4ExpTextRMSNorm):
     """Implement Qwen4 RMSNorm through the compiler-recognized custom op."""
 
     def forward(self, x):
-        if self.group_size is not None:
-            x = x.reshape(*x.shape[:-1], -1, self.group_size)
-            weight = (self.weight + 1.0).reshape(-1, self.group_size)
-        else:
-            weight = self.weight + 1.0
         rms_interface = select_interface(CustomRMSNormFunc.apply, torch.ops.qefficient.rms_norm)
-        output = rms_interface(x, weight, self.eps)
         if self.group_size is not None:
-            output = output.flatten(-2)
-        return output
+            inputs = x.split(self.group_size, dim=-1)
+            weights = (self.weight + 1.0).split(self.group_size, dim=0)
+            return torch.cat(
+                [rms_interface(group, weight, self.eps) for group, weight in zip(inputs, weights, strict=True)],
+                dim=-1,
+            )
+        return rms_interface(x, self.weight + 1.0, self.eps)
 
 
 class QEffQwen4ExpTextTopKRouter(Qwen4ExpTextTopKRouter):
@@ -580,7 +605,7 @@ class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
         block = torch.div(positions, ratio, rounding_mode="trunc")
         complete = torch.div(positions + 1, ratio, rounding_mode="trunc")
         boundary = positions + 1 == complete * ratio
-        total = partial + raw_key
+        total = partial.to(raw_key.dtype) + raw_key
         if len(position_embeddings) == 8:
             pooled_cos_cached, pooled_sin_cached = position_embeddings[6:]
             pooled_positions = position_embeddings[4][0].reshape(-1).to(torch.long)
@@ -634,14 +659,13 @@ class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
                 + torch.arange(index_cp, device=positions.device)[:, None]
             )
             visible = ids[None, None] < complete.reshape(batch_local, index_dp, 1, 1)
-            scores = scores.masked_fill(~visible, MIN_MASKED_ATTENTION_VALUE).reshape(batch, -1)
+            scores, visible = _qeff_flatten_qsa_shards(scores, visible)
         else:
             scores = F.relu(index_query @ index_attention.transpose(-1, -2)).sum(-2)
             visible = torch.arange(index_attention.shape[1], device=positions.device)[None, :] < complete[:, None]
-            scores = scores.masked_fill(~visible, MIN_MASKED_ATTENTION_VALUE)
-        blocks = scores.topk(min(self.indexer.block_topk, scores.shape[-1]), dim=-1).indices
+        blocks, blocks_valid = _qeff_qsa_select_blocks(scores, visible, self.indexer.block_topk)
         selected = (blocks.unsqueeze(-1) * ratio + torch.arange(ratio, device=positions.device)).reshape(batch, -1)
-        selected_valid = (blocks < complete[:, None]).unsqueeze(-1).expand(-1, -1, ratio).reshape(batch, -1)
+        selected_valid = blocks_valid.unsqueeze(-1).expand(-1, -1, ratio).reshape(batch, -1)
         tail = complete[:, None] * ratio + torch.arange(ratio, device=positions.device)[None, :]
         tail_valid = tail <= positions[:, None]
         selected = torch.cat((selected, tail), dim=-1)
@@ -669,7 +693,9 @@ class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
         probabilities = masked_logits.softmax(-1)
         output = (probabilities @ selected_values).reshape(batch, 1, -1)
         output = output * torch.sigmoid(gate.reshape(batch, 1, -1))
-        past_key_values.update_qsa_state(self.layer_idx, next_key, next_value, next_index, next_partial)
+        past_key_values.update_qsa_state(
+            self.layer_idx, next_key, next_value, next_index, next_partial.to(partial.dtype)
+        )
         return self.o_proj(output), None
 
     @staticmethod
@@ -691,8 +717,6 @@ class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
             .expand(batch_local, dp, cp, rows_per_way, 1, dim)
             .reshape(batch_local, rows, 1, dim)
         )
-        row = torch.arange(rows, device=positions.device).reshape(dp, cp, rows_per_way)
-        row = row[None].expand(batch_local, -1, -1, -1)
         owner = ways[:, :, None, None] == torch.arange(cp, device=positions.device).view(1, 1, cp, 1)
         owner = owner.expand(batch_local, dp, cp, rows_per_way)
         if valid is not None:
@@ -707,20 +731,25 @@ class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
         return ctx_paged_scatter(cache, block_ids.to(torch.int32), addresses.to(torch.int32), updates_rows)
 
     def _qsa_gather_folded(self, cache, selected, positions, deployment):
+        del positions
         dp, cp = deployment["attn_dp"], deployment["attn_cp"]
         kv_heads = cache.shape[1] // (dp * cp)
         batch, count = selected.shape
         batch_local = batch // dp
-        pos = selected[:, None, :].expand(batch, kv_heads, count)
-        pos_dp = pos.reshape(batch_local, dp, kv_heads, count)
-        ways = torch.zeros_like(pos_dp) if cp == 1 else pos_dp.remainder(cp)
-        row = (
-            torch.arange(dp, device=selected.device).view(1, dp, 1, 1) * cp * kv_heads
-            + ways * kv_heads
-            + torch.arange(kv_heads, device=selected.device).view(1, 1, kv_heads, 1)
+        selected_dp = selected.reshape(batch_local, dp, count)
+        local_addresses = torch.div(selected_dp, cp, rounding_mode="trunc")
+        gather_addresses = local_addresses[:, :, None, None, :].expand(batch_local, dp, cp, kv_heads, count)
+        gathered = ctx_gather_rows(
+            cache,
+            gather_addresses.reshape(batch_local, dp * cp * kv_heads, count).to(torch.int32),
         )
-        gathered = ctx_gather_rows(cache, row.reshape(batch_local, dp * kv_heads, count).to(torch.int32))
-        gathered = gathered.reshape(batch_local, dp, kv_heads, count, cache.shape[-1])
+        gathered = gathered.reshape(batch_local, dp, cp, kv_heads, count, cache.shape[-1])
+        if cp == 1:
+            gathered = gathered.squeeze(2)
+        else:
+            selected_way = selected_dp.remainder(cp)[:, :, None, None, :, None]
+            cache_way = torch.arange(cp, device=selected.device).reshape(1, 1, cp, 1, 1, 1)
+            gathered = torch.where(cache_way == selected_way, gathered, torch.zeros_like(gathered)).sum(dim=2)
         return gathered.reshape(batch, kv_heads, count, cache.shape[-1]).repeat_interleave(
             self.num_key_value_groups, dim=1
         )
@@ -1351,7 +1380,7 @@ class QEffQwen4ExpDecodeExportMixin:
                     else torch.zeros(
                         (batch_size, context // config.indexer_compress_ratio, config.indexer_head_dim), dtype=dtype
                     ),
-                    torch.zeros((batch_size, 1, config.indexer_head_dim), dtype=recurrent_state_dtype),
+                    torch.zeros((batch_size, 1, config.indexer_head_dim), dtype=torch.float32),
                 ]
                 axes = [
                     {0: batch_axis, 2: "local_ctx_len"},
@@ -1445,26 +1474,27 @@ class QEffQwen4ExpDecodeExportMixin:
 
         GDN/PLE retained states must remain graph-native tensors.  In
         particular, they are intentionally absent from custom I/O so the
-        compiler does not assign them an explicit precision.  QSA states may
-        use MXINT8 when requested.
+        compiler does not assign them an explicit precision.  The QSA partial
+        accumulator stays FP32, while the large QSA key/value/index states may
+        use MXINT8 when requested.  Native BF16 states are omitted because
+        ``bfloat16`` is not a supported custom-I/O precision spelling.
         """
         dtype = kwargs.pop("dtype", "float16")
         mxint8_kv_cache = kwargs.pop("mxint8_kv_cache", False)
         if kwargs:
             raise TypeError(f"Unexpected custom I/O options: {sorted(kwargs)}")
-        prefill_only = any(
-            (getattr(layer.self_attn, "_qsa_config", None) or {}).get("prefill_only", False)
-            for layer in self.model.layers
-            if hasattr(layer, "self_attn")
-        )
         custom_io = {}
         for state_name in self._iter_retained_state_names():
             if not state_name.startswith("qsa_"):
                 continue
-            if prefill_only and state_name.startswith("qsa_partial_state."):
+            if state_name.startswith("qsa_partial_state."):
                 state_dtype = "float"
+            elif mxint8_kv_cache:
+                state_dtype = "mxint8"
+            elif dtype == "bfloat16":
+                continue
             else:
-                state_dtype = "mxint8" if mxint8_kv_cache else dtype
+                state_dtype = dtype
             for name in (state_name, f"{state_name}_RetainedState"):
                 custom_io[name] = state_dtype
         return custom_io
