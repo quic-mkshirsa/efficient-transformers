@@ -1671,3 +1671,16 @@ class TestQwen4ExpRMSNormAccuracy:
 
         # Then check that the registered PyTorch transform produces the same outputs.
         assert_matches_upstream(transformed)
+
+    def test_grouped_custom_rmsnorm_export_uses_rank_one_weights(self):
+        from QEfficient.transformers.models.qwen4_exp.modeling_qwen4_exp import QEffQwen4ExpTextRMSNorm
+
+        group_size = 16
+        module = QEffQwen4ExpTextRMSNorm(128, group_size=group_size).eval()
+        exported = torch.export.export(module, (torch.randn(2, 5, 128),), strict=False)
+        rms_nodes = [
+            node for node in exported.graph_module.graph.nodes if node.target == torch.ops.qefficient.rms_norm.default
+        ]
+
+        assert len(rms_nodes) == 128 // group_size
+        assert all(node.args[1].meta["val"].shape == (group_size,) for node in rms_nodes)

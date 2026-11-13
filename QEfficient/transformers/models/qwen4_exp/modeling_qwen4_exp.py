@@ -152,16 +152,15 @@ class QEffQwen4ExpTextRMSNorm(Qwen4ExpTextRMSNorm):
     """Implement Qwen4 RMSNorm through the compiler-recognized custom op."""
 
     def forward(self, x):
-        if self.group_size is not None:
-            x = x.reshape(*x.shape[:-1], -1, self.group_size)
-            weight = (self.weight + 1.0).reshape(-1, self.group_size)
-        else:
-            weight = self.weight + 1.0
         rms_interface = select_interface(CustomRMSNormFunc.apply, torch.ops.qefficient.rms_norm)
-        output = rms_interface(x, weight, self.eps)
         if self.group_size is not None:
-            output = output.flatten(-2)
-        return output
+            inputs = x.split(self.group_size, dim=-1)
+            weights = (self.weight + 1.0).split(self.group_size, dim=0)
+            return torch.cat(
+                [rms_interface(group, weight, self.eps) for group, weight in zip(inputs, weights, strict=True)],
+                dim=-1,
+            )
+        return rms_interface(x, self.weight + 1.0, self.eps)
 
 
 class QEffQwen4ExpTextTopKRouter(Qwen4ExpTextTopKRouter):
