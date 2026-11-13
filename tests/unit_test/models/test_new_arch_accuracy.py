@@ -1077,7 +1077,7 @@ class TestQwen4ExpDecode:
         assert set(expected_names) <= set(model.get_onnx_dynamic_axes())
         assert inputs["ngram_embeddings"].shape == (1, 1, config.ple_embed_dim)
         assert inputs["past_key_values"][0][1].dtype == torch.float32
-        assert inputs["past_key_values"][3][3].dtype == inputs["ngram_embeddings"].dtype
+        assert inputs["past_key_values"][3][3].dtype == torch.float32
         assert isinstance(model.model.sin_cached, torch.nn.Parameter)
         assert isinstance(model.model.cos_cached, torch.nn.Parameter)
         assert model.model.sin_cached.shape == model.model.cos_cached.shape
@@ -1144,12 +1144,23 @@ class TestQwen4ExpDecode:
         assert set(custom_io) == {
             name for state_name in qsa_state_names for name in (state_name, f"{state_name}_RetainedState")
         }
-        assert set(custom_io.values()) == {"float16"}
-
-        mxint8_custom_io = model.get_custom_io(dtype="mxint8", mxint8_kv_cache=True)
         for state_name in qsa_state_names:
-            assert mxint8_custom_io[state_name] == "mxint8"
-            assert mxint8_custom_io[f"{state_name}_RetainedState"] == "mxint8"
+            expected_dtype = "float" if state_name.startswith("qsa_partial_state.") else "float16"
+            assert custom_io[state_name] == expected_dtype
+            assert custom_io[f"{state_name}_RetainedState"] == expected_dtype
+
+        bf16_custom_io = model.get_custom_io(dtype="bfloat16")
+        partial_state_names = [name for name in qsa_state_names if name.startswith("qsa_partial_state.")]
+        assert set(bf16_custom_io) == {
+            name for state_name in partial_state_names for name in (state_name, f"{state_name}_RetainedState")
+        }
+        assert set(bf16_custom_io.values()) == {"float"}
+
+        mxint8_custom_io = model.get_custom_io(dtype="bfloat16", mxint8_kv_cache=True)
+        for state_name in qsa_state_names:
+            expected_dtype = "float" if state_name.startswith("qsa_partial_state.") else "mxint8"
+            assert mxint8_custom_io[state_name] == expected_dtype
+            assert mxint8_custom_io[f"{state_name}_RetainedState"] == expected_dtype
 
     def test_qwen4_exp_host_ngram_lookup_matches_reference_hash_and_tracks_history(self, tmp_path):
         """The host lookup follows upstream PLE IDs without retaining a table in QEff."""

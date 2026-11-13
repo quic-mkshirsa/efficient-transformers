@@ -605,7 +605,7 @@ class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
         block = torch.div(positions, ratio, rounding_mode="trunc")
         complete = torch.div(positions + 1, ratio, rounding_mode="trunc")
         boundary = positions + 1 == complete * ratio
-        total = partial + raw_key
+        total = partial.to(raw_key.dtype) + raw_key
         if len(position_embeddings) == 8:
             pooled_cos_cached, pooled_sin_cached = position_embeddings[6:]
             pooled_positions = position_embeddings[4][0].reshape(-1).to(torch.long)
@@ -693,7 +693,9 @@ class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
         probabilities = masked_logits.softmax(-1)
         output = (probabilities @ selected_values).reshape(batch, 1, -1)
         output = output * torch.sigmoid(gate.reshape(batch, 1, -1))
-        past_key_values.update_qsa_state(self.layer_idx, next_key, next_value, next_index, next_partial)
+        past_key_values.update_qsa_state(
+            self.layer_idx, next_key, next_value, next_index, next_partial.to(partial.dtype)
+        )
         return self.o_proj(output), None
 
     @staticmethod
@@ -1378,7 +1380,7 @@ class QEffQwen4ExpDecodeExportMixin:
                     else torch.zeros(
                         (batch_size, context // config.indexer_compress_ratio, config.indexer_head_dim), dtype=dtype
                     ),
-                    torch.zeros((batch_size, 1, config.indexer_head_dim), dtype=recurrent_state_dtype),
+                    torch.zeros((batch_size, 1, config.indexer_head_dim), dtype=torch.float32),
                 ]
                 axes = [
                     {0: batch_axis, 2: "local_ctx_len"},
@@ -1472,26 +1474,27 @@ class QEffQwen4ExpDecodeExportMixin:
 
         GDN/PLE retained states must remain graph-native tensors.  In
         particular, they are intentionally absent from custom I/O so the
-        compiler does not assign them an explicit precision.  QSA states may
-        use MXINT8 when requested.
+        compiler does not assign them an explicit precision.  The QSA partial
+        accumulator stays FP32, while the large QSA key/value/index states may
+        use MXINT8 when requested.  Native BF16 states are omitted because
+        ``bfloat16`` is not a supported custom-I/O precision spelling.
         """
         dtype = kwargs.pop("dtype", "float16")
         mxint8_kv_cache = kwargs.pop("mxint8_kv_cache", False)
         if kwargs:
             raise TypeError(f"Unexpected custom I/O options: {sorted(kwargs)}")
-        prefill_only = any(
-            (getattr(layer.self_attn, "_qsa_config", None) or {}).get("prefill_only", False)
-            for layer in self.model.layers
-            if hasattr(layer, "self_attn")
-        )
         custom_io = {}
         for state_name in self._iter_retained_state_names():
             if not state_name.startswith("qsa_"):
                 continue
-            if prefill_only and state_name.startswith("qsa_partial_state."):
+            if state_name.startswith("qsa_partial_state."):
                 state_dtype = "float"
+            elif mxint8_kv_cache:
+                state_dtype = "mxint8"
+            elif dtype == "bfloat16":
+                continue
             else:
-                state_dtype = "mxint8" if mxint8_kv_cache else dtype
+                state_dtype = dtype
             for name in (state_name, f"{state_name}_RetainedState"):
                 custom_io[name] = state_dtype
         return custom_io
