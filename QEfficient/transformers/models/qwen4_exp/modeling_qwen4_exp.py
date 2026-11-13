@@ -141,6 +141,32 @@ def _build_qwen4_exp_pooled_mrope_cache(cos_cached, sin_cached, config, rotary_w
     )
 
 
+def _qeff_validate_qsa_blocks(raw_blocks, visible):
+    """Return safe QSA block indices and validity from the original mask."""
+    blocks_in_range = (raw_blocks >= 0) & (raw_blocks < visible.shape[-1])
+    blocks = raw_blocks.clamp(0, visible.shape[-1] - 1)
+    blocks_valid = blocks_in_range & visible.gather(-1, blocks)
+    return blocks, blocks_valid
+
+
+def _qeff_qsa_select_blocks(scores, visible, block_topk):
+    """Select only visible QSA blocks and keep backend TopK indices safe."""
+    # Some backends return invalid indices when every TopK input is -inf.  A
+    # finite dtype minimum preserves masked ordering, while the checks below
+    # keep any invalid backend result from reaching cache gathering.
+    masked_scores = scores.masked_fill(~visible, torch.finfo(scores.dtype).min)
+    raw_blocks = masked_scores.topk(min(block_topk, masked_scores.shape[-1]), dim=-1).indices
+    return _qeff_validate_qsa_blocks(raw_blocks, visible)
+
+
+def _qeff_flatten_qsa_shards(scores, visible):
+    """Flatten CP shards in logical context-block order."""
+    scores = scores.transpose(-2, -1)
+    visible = visible.transpose(-2, -1)
+    batch = scores.shape[0] * scores.shape[1]
+    return scores.reshape(batch, -1), visible.reshape(batch, -1)
+
+
 class QEffQwen4ExpTextRMSNormGated(Qwen4ExpTextRMSNormGated):
     def forward(self, hidden_states, gate):
         rms_interface = select_interface(CustomRMSNormFunc.apply, torch.ops.qefficient.rms_norm)
@@ -633,14 +659,13 @@ class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
                 + torch.arange(index_cp, device=positions.device)[:, None]
             )
             visible = ids[None, None] < complete.reshape(batch_local, index_dp, 1, 1)
-            scores = scores.masked_fill(~visible, MIN_MASKED_ATTENTION_VALUE).reshape(batch, -1)
+            scores, visible = _qeff_flatten_qsa_shards(scores, visible)
         else:
             scores = F.relu(index_query @ index_attention.transpose(-1, -2)).sum(-2)
             visible = torch.arange(index_attention.shape[1], device=positions.device)[None, :] < complete[:, None]
-            scores = scores.masked_fill(~visible, MIN_MASKED_ATTENTION_VALUE)
-        blocks = scores.topk(min(self.indexer.block_topk, scores.shape[-1]), dim=-1).indices
+        blocks, blocks_valid = _qeff_qsa_select_blocks(scores, visible, self.indexer.block_topk)
         selected = (blocks.unsqueeze(-1) * ratio + torch.arange(ratio, device=positions.device)).reshape(batch, -1)
-        selected_valid = (blocks < complete[:, None]).unsqueeze(-1).expand(-1, -1, ratio).reshape(batch, -1)
+        selected_valid = blocks_valid.unsqueeze(-1).expand(-1, -1, ratio).reshape(batch, -1)
         tail = complete[:, None] * ratio + torch.arange(ratio, device=positions.device)[None, :]
         tail_valid = tail <= positions[:, None]
         selected = torch.cat((selected, tail), dim=-1)
@@ -690,8 +715,6 @@ class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
             .expand(batch_local, dp, cp, rows_per_way, 1, dim)
             .reshape(batch_local, rows, 1, dim)
         )
-        row = torch.arange(rows, device=positions.device).reshape(dp, cp, rows_per_way)
-        row = row[None].expand(batch_local, -1, -1, -1)
         owner = ways[:, :, None, None] == torch.arange(cp, device=positions.device).view(1, 1, cp, 1)
         owner = owner.expand(batch_local, dp, cp, rows_per_way)
         if valid is not None:
@@ -706,20 +729,25 @@ class QEffQwen4ExpTextAttention(Qwen4ExpTextAttention):
         return ctx_paged_scatter(cache, block_ids.to(torch.int32), addresses.to(torch.int32), updates_rows)
 
     def _qsa_gather_folded(self, cache, selected, positions, deployment):
+        del positions
         dp, cp = deployment["attn_dp"], deployment["attn_cp"]
         kv_heads = cache.shape[1] // (dp * cp)
         batch, count = selected.shape
         batch_local = batch // dp
-        pos = selected[:, None, :].expand(batch, kv_heads, count)
-        pos_dp = pos.reshape(batch_local, dp, kv_heads, count)
-        ways = torch.zeros_like(pos_dp) if cp == 1 else pos_dp.remainder(cp)
-        row = (
-            torch.arange(dp, device=selected.device).view(1, dp, 1, 1) * cp * kv_heads
-            + ways * kv_heads
-            + torch.arange(kv_heads, device=selected.device).view(1, 1, kv_heads, 1)
+        selected_dp = selected.reshape(batch_local, dp, count)
+        local_addresses = torch.div(selected_dp, cp, rounding_mode="trunc")
+        gather_addresses = local_addresses[:, :, None, None, :].expand(batch_local, dp, cp, kv_heads, count)
+        gathered = ctx_gather_rows(
+            cache,
+            gather_addresses.reshape(batch_local, dp * cp * kv_heads, count).to(torch.int32),
         )
-        gathered = ctx_gather_rows(cache, row.reshape(batch_local, dp * kv_heads, count).to(torch.int32))
-        gathered = gathered.reshape(batch_local, dp, kv_heads, count, cache.shape[-1])
+        gathered = gathered.reshape(batch_local, dp, cp, kv_heads, count, cache.shape[-1])
+        if cp == 1:
+            gathered = gathered.squeeze(2)
+        else:
+            selected_way = selected_dp.remainder(cp)[:, :, None, None, :, None]
+            cache_way = torch.arange(cp, device=selected.device).reshape(1, 1, cp, 1, 1, 1)
+            gathered = torch.where(cache_way == selected_way, gathered, torch.zeros_like(gathered)).sum(dim=2)
         return gathered.reshape(batch, kv_heads, count, cache.shape[-1]).repeat_interleave(
             self.num_key_value_groups, dim=1
         )
