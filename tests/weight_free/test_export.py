@@ -123,7 +123,15 @@ def test_qwen4_exp_weight_free_four_layer_export_and_ort_execution(tmp_path):
 
     graph = onnx.load(str(onnx_path), load_external_data=False)
     assert_retained_state_outputs(onnx_path, expected_count=11)
-    computed_suffixes = {"sin_cached", "cos_cached", "inv_freq", "original_inv_freq", "_qeff_conv_positions"}
+    computed_suffixes = {
+        "sin_cached",
+        "cos_cached",
+        "pooled_sin_cached",
+        "pooled_cos_cached",
+        "inv_freq",
+        "original_inv_freq",
+        "_qeff_conv_positions",
+    }
     assert all(initializer.name.rsplit(".", 1)[-1] in computed_suffixes for initializer in graph.graph.initializer)
 
     source_model = source_model.__class__.from_pretrained(str(source_dir)).eval()
