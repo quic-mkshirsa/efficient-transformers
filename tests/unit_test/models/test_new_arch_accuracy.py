@@ -721,6 +721,91 @@ class TestQwen3_5MoEAccuracy:
 class TestQwen4ExpDecode:
     """Qwen4-Exp uses explicit decode states and host-provided PLE embeddings."""
 
+    def test_qwen4_exp_folded_qsa_gathers_selected_context_positions(self):
+        """DP cache rows must use selected token addresses, not physical row IDs."""
+        from types import SimpleNamespace
+
+        from QEfficient.transformers.models.qwen4_exp.modeling_qwen4_exp import QEffQwen4ExpTextAttention
+
+        dp, cp, kv_heads, context, dim = 4, 1, 2, 16, 3
+        per_head = torch.arange(kv_heads * context * dim, dtype=torch.float32).reshape(1, kv_heads, context, dim)
+        cache = per_head.repeat(1, dp * cp, 1, 1)
+        selected = torch.tensor([[0, 3, 7]]).expand(dp, -1)
+        attention = SimpleNamespace(num_key_value_groups=1)
+
+        actual = QEffQwen4ExpTextAttention._qsa_gather_folded(
+            attention,
+            cache,
+            selected,
+            torch.zeros(dp, dtype=torch.long),
+            deployment={"attn_dp": dp, "attn_cp": cp},
+        )
+        expected = per_head.expand(dp, -1, -1, -1).gather(
+            2,
+            selected[:, None, :, None].expand(dp, kv_heads, selected.shape[1], dim),
+        )
+
+        torch.testing.assert_close(actual, expected)
+
+    def test_qwen4_exp_folded_qsa_selects_the_context_parallel_owner(self):
+        """Context-parallel cache rows must contribute only their owned positions."""
+        from types import SimpleNamespace
+
+        from QEfficient.transformers.models.qwen4_exp.modeling_qwen4_exp import QEffQwen4ExpTextAttention
+
+        dp, cp, local_context = 2, 2, 4
+        cache = torch.empty(1, dp * cp, local_context, 1)
+        for dp_index in range(dp):
+            for cp_index in range(cp):
+                row = dp_index * cp + cp_index
+                for local_position in range(local_context):
+                    cache[0, row, local_position, 0] = 100 * dp_index + local_position * cp + cp_index
+        selected = torch.tensor([[0, 1, 6, 7], [2, 3, 4, 5]])
+
+        actual = QEffQwen4ExpTextAttention._qsa_gather_folded(
+            SimpleNamespace(num_key_value_groups=1),
+            cache,
+            selected,
+            torch.zeros(dp, dtype=torch.long),
+            deployment={"attn_dp": dp, "attn_cp": cp},
+        )
+        expected = torch.tensor([[[[0.0], [1.0], [6.0], [7.0]]], [[[102.0], [103.0], [104.0], [105.0]]]])
+
+        torch.testing.assert_close(actual, expected)
+
+    def test_qwen4_exp_qsa_flattens_context_parallel_shards_in_logical_order(self):
+        from QEfficient.transformers.models.qwen4_exp.modeling_qwen4_exp import _qeff_flatten_qsa_shards
+
+        scores = torch.tensor([[[[0.0, 2.0, 4.0], [1.0, 3.0, 5.0]]]])
+        visible = scores.to(torch.bool)
+
+        flat_scores, flat_visible = _qeff_flatten_qsa_shards(scores, visible)
+
+        torch.testing.assert_close(flat_scores, torch.arange(6, dtype=torch.float32).reshape(1, 6))
+        torch.testing.assert_close(flat_visible, torch.tensor([[False, True, True, True, True, True]]))
+
+    def test_qwen4_exp_qsa_topk_masks_all_invisible_blocks(self):
+        from QEfficient.transformers.models.qwen4_exp.modeling_qwen4_exp import _qeff_qsa_select_blocks
+
+        scores = torch.zeros((2, 8), dtype=torch.bfloat16)
+        visible = torch.zeros_like(scores, dtype=torch.bool)
+
+        blocks, blocks_valid = _qeff_qsa_select_blocks(scores, visible, block_topk=4)
+
+        assert torch.all((0 <= blocks) & (blocks < scores.shape[-1]))
+        assert not blocks_valid.any()
+
+    def test_qwen4_exp_qsa_topk_rejects_invalid_backend_indices(self):
+        from QEfficient.transformers.models.qwen4_exp.modeling_qwen4_exp import _qeff_validate_qsa_blocks
+
+        visible = torch.tensor([[False, True, False, False]])
+        raw_blocks = torch.tensor([[-3, 1, 99]])
+
+        blocks, blocks_valid = _qeff_validate_qsa_blocks(raw_blocks, visible)
+
+        torch.testing.assert_close(blocks, torch.tensor([[0, 1, 3]]))
+        torch.testing.assert_close(blocks_valid, torch.tensor([[False, True, False]]))
+
     def test_qwen4_exp_moe_block_matches_hf(self):
         """Canonical QEff dispatch must preserve the upstream MoE block numerics."""
         from QEfficient.transformers.models.qwen4_exp.modeling_qwen4_exp import QEffQwen4ExpForCausalLM
@@ -992,7 +1077,7 @@ class TestQwen4ExpDecode:
         assert set(expected_names) <= set(model.get_onnx_dynamic_axes())
         assert inputs["ngram_embeddings"].shape == (1, 1, config.ple_embed_dim)
         assert inputs["past_key_values"][0][1].dtype == torch.float32
-        assert inputs["past_key_values"][3][3].dtype == inputs["ngram_embeddings"].dtype
+        assert inputs["past_key_values"][3][3].dtype == torch.float32
         assert isinstance(model.model.sin_cached, torch.nn.Parameter)
         assert isinstance(model.model.cos_cached, torch.nn.Parameter)
         assert model.model.sin_cached.shape == model.model.cos_cached.shape
@@ -1059,12 +1144,23 @@ class TestQwen4ExpDecode:
         assert set(custom_io) == {
             name for state_name in qsa_state_names for name in (state_name, f"{state_name}_RetainedState")
         }
-        assert set(custom_io.values()) == {"float16"}
-
-        mxint8_custom_io = model.get_custom_io(dtype="mxint8", mxint8_kv_cache=True)
         for state_name in qsa_state_names:
-            assert mxint8_custom_io[state_name] == "mxint8"
-            assert mxint8_custom_io[f"{state_name}_RetainedState"] == "mxint8"
+            expected_dtype = "float" if state_name.startswith("qsa_partial_state.") else "float16"
+            assert custom_io[state_name] == expected_dtype
+            assert custom_io[f"{state_name}_RetainedState"] == expected_dtype
+
+        bf16_custom_io = model.get_custom_io(dtype="bfloat16")
+        partial_state_names = [name for name in qsa_state_names if name.startswith("qsa_partial_state.")]
+        assert set(bf16_custom_io) == {
+            name for state_name in partial_state_names for name in (state_name, f"{state_name}_RetainedState")
+        }
+        assert set(bf16_custom_io.values()) == {"float"}
+
+        mxint8_custom_io = model.get_custom_io(dtype="bfloat16", mxint8_kv_cache=True)
+        for state_name in qsa_state_names:
+            expected_dtype = "float" if state_name.startswith("qsa_partial_state.") else "mxint8"
+            assert mxint8_custom_io[state_name] == expected_dtype
+            assert mxint8_custom_io[f"{state_name}_RetainedState"] == expected_dtype
 
     def test_qwen4_exp_host_ngram_lookup_matches_reference_hash_and_tracks_history(self, tmp_path):
         """The host lookup follows upstream PLE IDs without retaining a table in QEff."""
@@ -1671,3 +1767,16 @@ class TestQwen4ExpRMSNormAccuracy:
 
         # Then check that the registered PyTorch transform produces the same outputs.
         assert_matches_upstream(transformed)
+
+    def test_grouped_custom_rmsnorm_export_uses_rank_one_weights(self):
+        from QEfficient.transformers.models.qwen4_exp.modeling_qwen4_exp import QEffQwen4ExpTextRMSNorm
+
+        group_size = 16
+        module = QEffQwen4ExpTextRMSNorm(128, group_size=group_size).eval()
+        exported = torch.export.export(module, (torch.randn(2, 5, 128),), strict=False)
+        rms_nodes = [
+            node for node in exported.graph_module.graph.nodes if node.target == torch.ops.qefficient.rms_norm.default
+        ]
+
+        assert len(rms_nodes) == 128 // group_size
+        assert all(node.args[1].meta["val"].shape == (group_size,) for node in rms_nodes)

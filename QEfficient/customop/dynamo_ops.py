@@ -37,9 +37,7 @@ def ctx_paged_scatter_op(
     rows = torch.arange(updates.shape[1], device=data.device).view(1, -1, 1).expand_as(block_id)
     safe_block = torch.where(valid, block_id, torch.zeros_like(block_id)).long()
     safe_addr = addr.long().clamp(0, data.shape[2] - 1)
-    out[safe_block, rows.long(), safe_addr] = torch.where(
-        valid.unsqueeze(-1), updates, torch.zeros_like(updates)
-    )
+    out[safe_block, rows.long(), safe_addr] = torch.where(valid.unsqueeze(-1), updates, torch.zeros_like(updates))
     return out
 
 

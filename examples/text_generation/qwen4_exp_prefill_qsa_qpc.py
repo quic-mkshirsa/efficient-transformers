@@ -1,3 +1,10 @@
+# -----------------------------------------------------------------------------
+#
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause
+#
+# -----------------------------------------------------------------------------
+
 """Export, compile, validate, and profile one Qwen3.8-Flash QSA prefill block.
 
 This is deliberately an attention-only graph: it runs layer 3's QSA with the

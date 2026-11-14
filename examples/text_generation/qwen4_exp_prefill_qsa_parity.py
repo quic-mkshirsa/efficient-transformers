@@ -1,3 +1,10 @@
+# -----------------------------------------------------------------------------
+#
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause
+#
+# -----------------------------------------------------------------------------
+
 """Compare the prefill-only QEff QSA block with its HF sparse-attention reference.
 
 The check uses the local four-layer Qwen3.8-Flash-Next checkpoint, layer 3,
@@ -18,7 +25,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import qwen4_exp_prefill_qsa_qpc as qsa
+import qwen4_exp_prefill_qsa_qpc as qsa  # noqa: E402
 
 
 def main() -> None:

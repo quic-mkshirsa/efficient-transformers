@@ -1,3 +1,10 @@
+# -----------------------------------------------------------------------------
+#
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause
+#
+# -----------------------------------------------------------------------------
+
 """Export, compile, and execute a prefill-only Qwen3.8-Flash-Next model.
 
 The default workload is batch 1, PL=1,024, CL=65,536, and four AI200 cores.

@@ -99,10 +99,9 @@ def test_weight_free_export_onnx_structure(model_type, model_id, tmp_export_dir)
 @pytest.mark.weight_free_export
 def test_qwen4_exp_weight_free_four_layer_export_and_ort_execution(tmp_path):
     """Export and execute a locally generated four-layer Qwen4-Exp checkpoint."""
-    from tests.unit_test.models.test_new_arch_accuracy import make_tiny_qwen4_exp
-
     from QEfficient.exporter.weight_free import load_weight_free_ort_inputs
     from QEfficient.transformers.models.pytorch_transforms import KVCacheTransform
+    from tests.unit_test.models.test_new_arch_accuracy import make_tiny_qwen4_exp
 
     source_dir = tmp_path / "qwen4_exp_checkpoint"
     source_model, _ = make_tiny_qwen4_exp()
@@ -124,7 +123,15 @@ def test_qwen4_exp_weight_free_four_layer_export_and_ort_execution(tmp_path):
 
     graph = onnx.load(str(onnx_path), load_external_data=False)
     assert_retained_state_outputs(onnx_path, expected_count=11)
-    computed_suffixes = {"sin_cached", "cos_cached", "inv_freq", "original_inv_freq", "_qeff_conv_positions"}
+    computed_suffixes = {
+        "sin_cached",
+        "cos_cached",
+        "pooled_sin_cached",
+        "pooled_cos_cached",
+        "inv_freq",
+        "original_inv_freq",
+        "_qeff_conv_positions",
+    }
     assert all(initializer.name.rsplit(".", 1)[-1] in computed_suffixes for initializer in graph.graph.initializer)
 
     source_model = source_model.__class__.from_pretrained(str(source_dir)).eval()

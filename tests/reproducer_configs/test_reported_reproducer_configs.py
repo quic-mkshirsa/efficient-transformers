@@ -98,7 +98,7 @@ OFFICIAL_MODEL_ENV = "QEFF_REPRODUCER_USE_OFFICIAL_MODELS"
 REPORT_PATH_ENV = "QEFF_REPRODUCER_REPORT_MD"
 SCENARIO_FILTER_ENV = "QEFF_REPRODUCER_SCENARIO"
 DEFAULT_REPORT_PATH = Path("tests/reproducer_configs/reproducer_config_results.md")
-EXPECTED_SCENARIO_COUNT = 51
+EXPECTED_SCENARIO_COUNT = 52
 EXTRA_QEFF_COMPILE_OPTIONS = frozenset(
     {
         "height",
@@ -760,6 +760,39 @@ SCENARIOS: tuple[RegressionScenario, ...] = (
         tiny_model_id=TINY_QWEN3_5_MOE,
         summary="layerwise 3-QPC export ran for many hours without decoder artifacts",
         skip_reason="long-running layerwise export scenario requires full model artifacts",
+    ),
+    RegressionScenario(
+        name="qwen38-flash-next-dp16-decode-parity",
+        stage="inference",
+        source_model_card="Qwen/Qwen3.8-Flash-Next",
+        tiny_model_id=None,
+        official_model_id="Qwen/Qwen3.8-Flash-Next",
+        summary="four-layer BF16 DP16 decode produced invalid QSA selections and divergent batch rows",
+        config={
+            "layers": 4,
+            "dtype": "bfloat16",
+            "qsa_state_precision": "mxint8",
+            "parity_steps": 4,
+            "attn_dp": 16,
+            "indexer_dp": 16,
+        },
+        compile_kwargs={
+            "prefill_seq_len": 1,
+            "ctx_len": 65536,
+            "batch_size": 16,
+            "num_devices": 16,
+            "num_cores": 4,
+            "aic_hw_version": "ai200",
+            "mxfp6_matmul": False,
+            "offload_pt_weights": False,
+            "mxint8_kv_cache": True,
+            "allow_mxint8_mdp_io": True,
+            "dynamo": True,
+            "use_onnx_subfunctions": False,
+        },
+        inference_kwargs={"generation_len": 4},
+        skip_reason="verdict requires the Qwen3.8 host n-gram path and an AI200 DP16 runtime",
+        follow_up="wire the specialized Qwen3.8 DP16 parity runner into the hardware reproducer job",
     ),
     RegressionScenario(
         name="gptoss-mdp-num-partitions-file",
