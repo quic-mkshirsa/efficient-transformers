@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+# -----------------------------------------------------------------------------
+#
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause
+#
+# -----------------------------------------------------------------------------
+
 """Build and run a decode-only Qwen3.8-Flash-Next model.
 
 This is a decode-only DP16/CP1 flow.  With no ``--checkpoint``, it loads the
@@ -33,7 +40,6 @@ from transformers import AutoConfig, AutoTokenizer
 
 from QEfficient.transformers.models.qwen4_exp.host_ngram import HostNGramHistory, ShardedNGramLookup
 
-
 BATCH_SIZE = 16
 DEFAULT_LAYERS = 4
 CONTEXT_LENGTH = 65_536
@@ -42,8 +48,7 @@ OPSTATS_PROFILE_START_ITER = 20
 OPSTATS_PROFILE_SAMPLES = 2
 OPSTATS_STATS_LEVEL = 70
 COMPILER_OPTS_UNSUPPORTED = (
-    "-aic-hoist-vtcm-loads=false -aic-op-stats-verbosity 2 "
-    "-aic-userdma-async=0 -aic-hmx-async=0 -aic-sync-ts-starts"
+    "-aic-hoist-vtcm-loads=false -aic-op-stats-verbosity 2 -aic-userdma-async=0 -aic-hmx-async=0 -aic-sync-ts-starts"
 )
 
 
@@ -138,7 +143,7 @@ class Qwen4ExpQAICDecodeRunner:
             for name, binding_name in self.host_input_names.items()
         }
         if self.host_input_shapes["input_ids"][1:] != (1,):
-            raise ValueError(f"Decode-only QPC must accept input_ids with sequence length 1")
+            raise ValueError("Decode-only QPC must accept input_ids with sequence length 1")
         if self.host_input_shapes["ngram_embeddings"][1:] != (1, 2560):
             raise ValueError(f"Unexpected Qwen n-gram embedding shape: {self.host_input_shapes['ngram_embeddings']}")
 

@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+# -----------------------------------------------------------------------------
+#
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause
+#
+# -----------------------------------------------------------------------------
+
 """Compile, profile, and extract layerwise opstats for four-layer Qwen3.8 Flash.
 
 The model used by this workflow is the four-layer Qwen4-Exp/Qwen3.8-Flash

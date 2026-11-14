@@ -99,10 +99,9 @@ def test_weight_free_export_onnx_structure(model_type, model_id, tmp_export_dir)
 @pytest.mark.weight_free_export
 def test_qwen4_exp_weight_free_four_layer_export_and_ort_execution(tmp_path):
     """Export and execute a locally generated four-layer Qwen4-Exp checkpoint."""
-    from tests.unit_test.models.test_new_arch_accuracy import make_tiny_qwen4_exp
-
     from QEfficient.exporter.weight_free import load_weight_free_ort_inputs
     from QEfficient.transformers.models.pytorch_transforms import KVCacheTransform
+    from tests.unit_test.models.test_new_arch_accuracy import make_tiny_qwen4_exp
 
     source_dir = tmp_path / "qwen4_exp_checkpoint"
     source_model, _ = make_tiny_qwen4_exp()

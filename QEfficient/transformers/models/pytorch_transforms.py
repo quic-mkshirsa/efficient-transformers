@@ -242,18 +242,6 @@ from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
     Qwen3_5MoeVisionAttention,
     Qwen3_5MoeVisionModel,
 )
-from transformers.models.qwen4_exp.modeling_qwen4_exp import (
-    Qwen4ExpForCausalLM,
-    Qwen4ExpTextAttention,
-    Qwen4ExpTextDecoderLayer,
-    Qwen4ExpTextExperts,
-    Qwen4ExpTextGatedDeltaNet,
-    Qwen4ExpTextModel,
-    Qwen4ExpTextPLELayer,
-    Qwen4ExpTextRMSNorm,
-    Qwen4ExpTextRMSNormGated,
-    Qwen4ExpTextSparseMoeBlock,
-)
 from transformers.models.qwen3_moe.modeling_qwen3_moe import (
     Qwen3MoeAttention,
     Qwen3MoeDecoderLayer,
@@ -289,6 +277,18 @@ from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import (
     Qwen3VLMoeTextTopKRouter,
     Qwen3VLMoeVisionAttention,
     Qwen3VLMoeVisionModel,
+)
+from transformers.models.qwen4_exp.modeling_qwen4_exp import (
+    Qwen4ExpForCausalLM,
+    Qwen4ExpTextAttention,
+    Qwen4ExpTextDecoderLayer,
+    Qwen4ExpTextExperts,
+    Qwen4ExpTextGatedDeltaNet,
+    Qwen4ExpTextModel,
+    Qwen4ExpTextPLELayer,
+    Qwen4ExpTextRMSNorm,
+    Qwen4ExpTextRMSNormGated,
+    Qwen4ExpTextSparseMoeBlock,
 )
 from transformers.models.roberta.modeling_roberta import RobertaModel
 from transformers.models.starcoder2.modeling_starcoder2 import (
@@ -603,18 +603,6 @@ from QEfficient.transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
     QEffQwen3_5MoeVisionAttention,
     QEffQwen3_5MoeVisionModel,
 )
-from QEfficient.transformers.models.qwen4_exp.modeling_qwen4_exp import (
-    QEffQwen4ExpForCausalLM,
-    QEffQwen4ExpTextAttention,
-    QEffQwen4ExpTextDecoderLayer,
-    QEffQwen4ExpTextExperts,
-    QEffQwen4ExpTextGatedDeltaNet,
-    QEffQwen4ExpTextModel,
-    QEffQwen4ExpTextPLELayer,
-    QEffQwen4ExpTextRMSNorm,
-    QEffQwen4ExpTextRMSNormGated,
-    QEffQwen4ExpTextSparseMoeBlock,
-)
 from QEfficient.transformers.models.qwen3_moe.modeling_qwen3_moe import (
     QEffQwen3MoeAttention,
     QEffQwen3MoeDecoderLayer,
@@ -647,6 +635,18 @@ from QEfficient.transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import (
     QEffQwen3VLMoeTextTopKRouter,
     QEffQwen3VLMoeVisionAttention,
     QEffQwen3VLMoeVisionModel,
+)
+from QEfficient.transformers.models.qwen4_exp.modeling_qwen4_exp import (
+    QEffQwen4ExpForCausalLM,
+    QEffQwen4ExpTextAttention,
+    QEffQwen4ExpTextDecoderLayer,
+    QEffQwen4ExpTextExperts,
+    QEffQwen4ExpTextGatedDeltaNet,
+    QEffQwen4ExpTextModel,
+    QEffQwen4ExpTextPLELayer,
+    QEffQwen4ExpTextRMSNorm,
+    QEffQwen4ExpTextRMSNormGated,
+    QEffQwen4ExpTextSparseMoeBlock,
 )
 from QEfficient.transformers.models.starcoder2.modeling_starcoder2 import (
     QEffStarcoder2Attention,

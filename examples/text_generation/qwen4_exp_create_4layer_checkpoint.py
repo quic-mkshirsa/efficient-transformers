@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+# -----------------------------------------------------------------------------
+#
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+# SPDX-License-Identifier: BSD-3-Clause
+#
+# -----------------------------------------------------------------------------
+
 """Create the local four-layer, weight-free Qwen3.8-Flash checkpoint window.
 
 The source snapshot is read shard-by-shard. Host-side PLE embedding tables are
