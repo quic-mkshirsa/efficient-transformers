@@ -169,9 +169,11 @@ def _qeff_flatten_qsa_shards(scores, visible):
 
 class QEffQwen4ExpTextRMSNormGated(Qwen4ExpTextRMSNormGated):
     def forward(self, hidden_states, gate):
+        input_dtype = hidden_states.dtype
         rms_interface = select_interface(CustomRMSNormFunc.apply, torch.ops.qefficient.rms_norm)
-        normed = rms_interface(hidden_states, self.weight, self.variance_epsilon)
-        return (normed * ACT2FN[self.activation](gate.to(torch.float32))).to(normed.dtype)
+        normed = rms_interface(hidden_states.to(torch.float32), self.weight.to(torch.float32), self.variance_epsilon)
+        normed = normed.to(input_dtype)
+        return (normed * ACT2FN[self.activation](gate.to(torch.float32))).to(input_dtype)
 
 
 class QEffQwen4ExpTextRMSNorm(Qwen4ExpTextRMSNorm):
